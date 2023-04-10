@@ -27,11 +27,18 @@ void headerUsage(int samples, int tdelay){
 
     // Get information about the utilization of memory in kilobytes and store it in used_memory
     struct rusage usage;
-    getrusage(RUSAGE_SELF, &usage);
+    int result = getrusage(RUSAGE_SELF, &usage);
+
+    // Check for errors in getrusage
+    if (result != 0) {
+        fprintf(stderr, "Error: getrusage failed with error code: %d - %s\n", errno, strerror(errno));
+        return;
+    }
+
     long used_memory = usage.ru_maxrss;
 
-    // Print the number of samples, tdelay, and memory usgae
-    printf("Nbr of samples: %d -- every %d secs\n Memory usage: %ld kilobytes\n", samples, tdelay, used_memory);
+    // Print the number of samples, tdelay, and memory usage
+    printf("Nbr of samples: %d -- every %d secs\nMemory usage: %ld kilobytes\n", samples, tdelay, used_memory);
 
 }
 
@@ -55,9 +62,15 @@ void footerUsage(){
     
     // Retrive System information
     struct utsname sysinfo;
-    uname(&sysinfo);
+    int result = uname(&sysinfo);
 
-    // Prints relavent information such as system name, Machine name, Version, Releasem Architecture
+    // Check for errors in uname
+    if (result == -1) {
+        fprintf(stderr, "Error: uname failed with error code: %d - %s\n", errno, strerror(errno));
+        return;
+    }
+
+    // Prints relevant information such as system name, machine name, version, release, architecture
     printf("--------------------------------------------\n");
     printf("### System Information ###\n");
     printf(" System Name = %s\n", sysinfo.sysname);
@@ -368,11 +381,11 @@ int main(int argc, char *argv[]){
         }
         else if (strncmp(argv[i], "--samples=", 10) == 0){
             // Gets integer in string, and sets found to true to indicate that samples have been seen
-            sscanf(argv[i], "%d", &samples);
+            sscanf(argv[i] + 10, "%d", &samples);
             found = true;
         }
         else if (strncmp(argv[i], "--tdelay=", 9) == 0){
-            sscanf(argv[i], "%d", &tdelay);
+            sscanf(argv[i] + 9, "%d", &tdelay);
         }
         // If integer is passed as command line argument the first is samples and the second is delay
         else if (isdigit(*argv[i])){
