@@ -151,7 +151,13 @@ void systemOutput(char terminal[1024][1024], bool graphics, int i, double* memor
 
     // Gets memory
     struct sysinfo memory;
-    sysinfo (&memory);
+    int result = sysinfo(&memory);
+
+    // Check for errors in sysinfo
+    if (result != 0) {
+        fprintf(stderr, "Error: sysinfo failed with error code: %d - %s\n", errno, strerror(errno));
+        return;
+    }
 
     // Calculate the memory usgae and total memory in GB
     double total_memory = (double) memory.totalram / (1024 * 1024 * 1024);
@@ -184,21 +190,31 @@ void userOutput(){
     printf("--------------------------------------------\n");
     printf("### Sessions/users ###\n");
 
-    // Initalize and open utmp
+    // Initialize and open utmp
     struct utmp *utmp;
     setutent();
 
     while ((utmp = getutent()) != NULL) {
+        // Check for errors in getutent()
+        if (errno != 0) {
+            fprintf(stderr, "Error: getutent() failed with error code: %d - %s\n", errno, strerror(errno));
+            errno = 0;
+            continue;
+        }
+
         // Checks for user process
-        if (utmp -> ut_type == USER_PROCESS) {
+        if (utmp->ut_type == USER_PROCESS) {
             // Prints the User, session, host
-            printf("%s\t %s (%s)\n", utmp -> ut_user, utmp -> ut_line, utmp -> ut_host);
+            printf("%s\t %s (%s)\n", utmp->ut_user, utmp->ut_line, utmp->ut_host);
         }
     }
 
-    // close utmp
+    // Check for errors in endutent()
     endutent();
 
+    if (errno != 0) {
+        fprintf(stderr, "Error: endutent() failed with error code: %d - %s\n", errno, strerror(errno));
+    }
 }
 
 void CPUGraphics(char terminal[1024][1024], double usage, int i){
@@ -249,13 +265,27 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
 
     // Gets system info
     struct sysinfo cpu;
-    sysinfo(&cpu);
+    if (sysinfo(&cpu) != 0) {
+        fprintf(stderr, "Error: failed to get system info. (%s)\n", strerror(errno));
+        return;
+    }
     
     // Opens proc stat file with cpu usage
     FILE *fp = fopen("/proc/stat", "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Error: failed to open /proc/stat. (%s)\n", strerror(errno));
+        return;
+    }
+
     long int user, nice, system, idle, iowait, irq, softirq;
-    fscanf(fp, "cpu %ld %ld %ld %ld %ld %ld %ld", &user, &nice, &system, &idle, &iowait, &irq, &softirq);
+    int read_items = fscanf(fp, "cpu %ld %ld %ld %ld %ld %ld %ld", &user, &nice, &system, &idle, &iowait, &irq, &softirq);
     fclose(fp);
+
+    // Checks that all the items have been read
+    if (read_items != 7) {
+        fprintf(stderr, "Error: failed to read CPU values from /proc/stat. Read %d items instead of 7.\n", read_items);
+        return;
+    }
 
     // Calculates total usage of cpu
     long int cpu_total = user + nice + system + iowait + irq + softirq;
@@ -281,14 +311,19 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
     *idle_previous = idle;
 
     // Prints the number of cores and cpu usage
+    long int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_cores < 0) {
+        fprintf(stderr, "Error: failed to get the number of cores. (%s)\n", strerror(errno));
+        return;
+    }
+
     printf("--------------------------------------------\n");
-    printf("Number of Cores: %ld\n", sysconf(_SC_NPROCESSORS_ONLN));
+    printf("Number of Cores: %ld\n", num_cores);
     printf(" total cpu use: %.2f%%\n", cpu_use);
 
     // If graphics have been slected then call the graphics function to add the visuals
     if (graphics){ CPUGraphics(terminal, cpu_use, i); }
-
-
+    
 }
 
 void display(int samples, int tdelay, bool system, bool user, bool graphics, bool sequential){
