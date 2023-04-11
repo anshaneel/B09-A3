@@ -8,8 +8,42 @@
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <math.h>
 #include <utmp.h>
+#include <errno.h>
+
+void signal_handler(int sig) {
+    char ans;
+
+    // If Ctrl-Z detected it will proceed as normal
+    if (sig == SIGTSTP) { return; }
+
+    // If Ctrl-C detected it will ask user if they want to proceed
+    if (sig == SIGINT) {
+        printf("\nCtrl-C detected: ");
+        printf("Do you want to quit? (press 'y' if yes) ");
+
+        // Wait for user input
+        int ret = scanf(" %c", &ans);
+        if (ret == EOF) {
+            if (errno == EINTR) {
+                printf("\nSignal detected during scanf, resuming...\n");
+                return;
+            } 
+            else {
+                perror("scanf error");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        if (ans == 'y' || ans == 'Y') {
+            exit(EXIT_SUCCESS);
+        } else {
+            printf("Resuming...\n");
+        }
+    }
+}
 
 void headerUsage(int samples, int tdelay){
     /**
@@ -192,15 +226,15 @@ void userOutput(){
 
     // Initialize and open utmp
     struct utmp *utmp;
+    if (utmpname(_PATH_UTMP) == -1) {
+        perror("Error setting utmp file");
+        return;
+    }
+
     setutent();
 
     while ((utmp = getutent()) != NULL) {
-        // Check for errors in getutent()
-        if (errno != 0) {
-            fprintf(stderr, "Error: getutent() failed with error code: %d - %s\n", errno, strerror(errno));
-            errno = 0;
-            continue;
-        }
+        // Check for errors in getutent() -------------------
 
         // Checks for user process
         if (utmp->ut_type == USER_PROCESS) {
@@ -212,9 +246,6 @@ void userOutput(){
     // Check for errors in endutent()
     endutent();
 
-    if (errno != 0) {
-        fprintf(stderr, "Error: endutent() failed with error code: %d - %s\n", errno, strerror(errno));
-    }
 }
 
 void CPUGraphics(char terminal[1024][1024], double usage, int i){
@@ -297,7 +328,7 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
         return;
     }
 
-    // Cpu value calculations
+    // Cpu value calculations (Same as assignment)
     long int total_prev = *cpu_previous + *idle_previous;
     long int total_cur = idle + cpu_total;
     double totald = (double) total_cur - (double) total_prev;
@@ -326,6 +357,83 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
     
 }
 
+void createUserChildProcess(int pipefd[2]) {
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
+        exit(1);
+    }
+    else if (pid == 0) {
+        // Child process
+        close(pipefd[0]); // Close unused read end
+        dup2(pipefd[1], STDOUT_FILENO); // Redirect stdout to the pipe
+        close(pipefd[1]); // Close unused write end
+        userOutput();
+        exit(0);
+    } 
+    else {
+        // Parent process
+        close(pipefd[1]); // Close unused write end
+
+        // Read user information from the pipe
+        char buffer[1024];
+        int bytesRead;
+        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
+            buffer[bytesRead] = '\0';
+            printf("%s", buffer);
+        }
+        close(pipefd[0]); // Close read end after reading
+    }
+}
+
+void createMemoryChildProcess(int pipefd[2], char terminal[1024][1024], bool graphics, int i, double* memory_previous) {
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
+        exit(1);
+    }
+    else if (pid == 0) {
+        // Child process
+        close(pipefd[0]); // Close unused read end
+        dup2(pipefd[1], STDOUT_FILENO); // Redirect stdout to the pipe
+        close(pipefd[1]); // Close unused write end
+        systemOutput(terminal, graphics, i, memory_previous);
+        exit(0);
+    } 
+    else {
+        // Parent process
+        close(pipefd[1]); // Close unused write end
+
+        // Read user information from the pipe
+        char buffer[1024];
+        int bytesRead;
+        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
+            buffer[bytesRead] = '\0';
+            printf("%s", buffer);
+        }
+        close(pipefd[0]); // Close read end after reading
+    }
+}
+
+void createCPUChildProcess(int pipefd[2], char terminal[1024][1024], bool graphics, int i, long int* cpu_previous, long int* idle_previous) {
+    pid_t pid = fork();
+
+    if (pid == -1) {
+        fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
+        exit(1);
+    } 
+    else if (pid == 0) {
+        // Child process
+        close(pipefd[0]); // Close unused read end
+        dup2(pipefd[1], STDOUT_FILENO); // Redirect stdout to the pipe
+        close(pipefd[1]); // Close unused write end
+        CPUOutput(terminal, graphics, i, cpu_previous, idle_previous);
+        exit(0);
+    }
+}
+
 void display(int samples, int tdelay, bool system, bool user, bool graphics, bool sequential){
     /**
     * Outputs all the system information according to the command line arguments selected by user
@@ -342,15 +450,40 @@ void display(int samples, int tdelay, bool system, bool user, bool graphics, boo
     * Equential prints information in sequential manner
     */
 
+    // Initialize signal handler
+    struct sigaction act;
+    act.sa_handler = signal_handler;
+    act.sa_flags = 0;
+    sigemptyset(&act.sa_mask);
+
+    if (sigaction(SIGINT, &act, NULL) == -1) {
+        perror("sigaction error for SIGINT");
+        exit(EXIT_FAILURE);
+    }
+
+    if (sigaction(SIGTSTP, &act, NULL) == -1) {
+        perror("sigaction error for SIGTSTP");
+        exit(EXIT_FAILURE);
+    }
+
+
     // Initialize variables for terminal and cpu output, aswell as previous values for memeory and cpu usage
     char terminal_memory_output[1024][1024];
     char CPU_output[1024][1024];
     double memory_previous;
     long int cpu_previous = 0, idle_previous = 0;
 
+    // Create Pipes
+    int pipefd_memory[2], pipefd_cpu[2], pipefd_user[2];
+
+    if (pipe(pipefd_memory) == -1 || pipe(pipefd_cpu) == -1 || pipe(pipefd_user) == -1) {
+        fprintf(stderr, "Error: pipe creation failed. (%s)\n", strerror(errno));
+        exit(1);
+    }
+
     // Initialize the cpu information with -1 iteration
     CPUOutput(CPU_output, graphics, -1, &cpu_previous, &idle_previous);
-    sleep(1);
+    
     // Loop samples number of times
     for (int i = 0; i < samples; i++){
         // If sequential is selected then we do not reset terminal between iterations and state iteration number
@@ -367,7 +500,7 @@ void display(int samples, int tdelay, bool system, bool user, bool graphics, boo
         }
         
          // If user is slected diplays user information usinf userOutput function
-        if (user){ userOutput(); }
+        if (user){ createUserChildProcess(pipefd_user); }
         // Displays cpu information using CPUOutput function is system is selected
         if (system){ CPUOutput(CPU_output, graphics, i, &cpu_previous, &idle_previous); }
 
