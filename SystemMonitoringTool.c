@@ -8,10 +8,32 @@
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <signal.h>
 #include <math.h>
 #include <utmp.h>
 #include <errno.h>
+
+type def struct memory {
+
+    double total_memory;
+    double used_memory;
+    double total_virtual;
+    double used_virtual;
+
+} memory;
+
+type def struct cpu_stats {
+    
+    long int user;
+    long int nice;
+    long int system;
+    long int idle;
+    long int iowait;
+    long int irq;
+    long int softirq;
+
+} cpu_stats;
 
 void signal_handler(int sig) {
     char ans;
@@ -167,7 +189,37 @@ void memoryGraphicsOutput(char memoryGraphics[1024], double memory_current, doub
 
 }
 
-void systemOutput(char terminal[1024][1024], bool graphics, int i, double* memory_previous){
+void memoryStats(int pipefd[2]){
+
+    // Define memory data type
+    memory info;
+
+    // Gets memory
+    struct sysinfo memory;
+    int result = sysinfo(&memory);
+
+    // Check for errors in sysinfo
+    if (result != 0) {
+        fprintf(stderr, "Error: sysinfo failed with error code: %d - %s\n", errno, strerror(errno));
+        return;
+    }
+
+    // Calculate the memory usgae and total memory in GB
+    info.total_memory = (double) memory.totalram / (1024 * 1024 * 1024);
+    info.used_memory =  (double) (memory.totalram - memory.freeram) / (1024 * 1024 * 1024);
+    info.total_virtual = (double) (memory.totalram + memory.totalswap) / (1024 * 1024 * 1024);
+    info.used_virtual = (double) (memory.totalram - memory.freeram + memory.totalswap - memory.freeswap) / (1024 * 1024 * 1024);
+
+    ssize_t bytes_written = write(pipefd[1], &info, sizeof(info));
+
+    if (bytes_written == -1) {
+        perror("Error writing to pipe");
+        return;
+    }       
+
+}
+
+void systemOutput(char terminal[1024][1024], bool graphics, int i, double* memory_previous, memory info){
     /**
     * Function Gets memory information of function and stores it in terminal then prints all memory information thus far
     * Gets information using sysinfo function from sys/sysinfo.h library
@@ -185,26 +237,15 @@ void systemOutput(char terminal[1024][1024], bool graphics, int i, double* memor
 
     // Gets memory
     struct sysinfo memory;
-    int result = sysinfo(&memory);
-
-    // Check for errors in sysinfo
-    if (result != 0) {
-        fprintf(stderr, "Error: sysinfo failed with error code: %d - %s\n", errno, strerror(errno));
-        return;
-    }
-
-    // Calculate the memory usgae and total memory in GB
-    double total_memory = (double) memory.totalram / (1024 * 1024 * 1024);
-    double used_memory =  (double) (memory.totalram - memory.freeram) / (1024 * 1024 * 1024);
-    double total_virtual = (double) (memory.totalram + memory.totalswap) / (1024 * 1024 * 1024);
-    double used_virtual = (double) (memory.totalram - memory.freeram + memory.totalswap - memory.freeswap) / (1024 * 1024 * 1024);
+    sysinfo (&memory);
+    
     
     // Add the memmory usage to terminal
-    sprintf(terminal[i], "%.2f GB / %.2f GB -- %.2f GB / %.2f GB", used_memory, total_memory, used_virtual, total_virtual);
+    sprintf(terminal[i], "%.2f GB / %.2f GB -- %.2f GB / %.2f GB", info.used_memory, info.total_memory, info.used_virtual, info.total_virtual);
 
     // If graphics is enabled then add the visual from the graphics function
     if (graphics){ 
-        char graphics_output[1024]; memoryGraphicsOutput(graphics_output, used_memory, memory_previous, i);
+        char graphics_output[1024]; memoryGraphicsOutput(graphics_output, info.used_memory, info.memory_previous, i);
         strcat(terminal[i], graphics_output); 
     }
 
@@ -214,7 +255,7 @@ void systemOutput(char terminal[1024][1024], bool graphics, int i, double* memor
     }
 }
 
-void userOutput(){
+void userOutput(int pipefd[2]){
     /**
     * Prints information about current user sessions
     * gets information from utmp.h library and prints to each session to terminal
@@ -239,12 +280,58 @@ void userOutput(){
         // Checks for user process
         if (utmp->ut_type == USER_PROCESS) {
             // Prints the User, session, host
-            printf("%s\t %s (%s)\n", utmp->ut_user, utmp->ut_line, utmp->ut_host);
+            char buffer[1024];
+            snprintf(buffer, sizeof(buffer), "%s\t %s (%s)\n", utmp->ut_user, utmp->ut_line, utmp->ut_host);
+
+            // Write the formatted string to the pipe
+            ssize_t bytes_written = write(pipefd[1], buffer, strlen(buffer));
+            if (bytes_written == -1) {
+                perror("Error writing to pipe");
+                return;
+            }       
         }
     }
 
     // Check for errors in endutent()
     endutent();
+
+    close(pipefd[1]);
+
+}
+
+void cpuStats(int pipefd[2]){
+
+    cpu_stats info;
+    // Gets system info
+    struct sysinfo cpu;
+    if (sysinfo(&cpu) != 0) {
+        fprintf(stderr, "Error: failed to get system info. (%s)\n", strerror(errno));
+        return;
+    }
+    
+    // Opens proc stat file with cpu usage
+    FILE *fp = fopen("/proc/stat", "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Error: failed to open /proc/stat. (%s)\n", strerror(errno));
+        return;
+    }
+
+    long int user, nice, system, idle, iowait, irq, softirq;
+    int read_items = fscanf(fp, "cpu %ld %ld %ld %ld %ld %ld %ld", &info.user, &info.nice, &info.system, &info.idle, &info.iowait, &info.irq, &info.softirq);
+    fclose(fp);
+
+    // Checks that all the items have been read
+    if (read_items != 7) {
+        fprintf(stderr, "Error: failed to read CPU values from /proc/stat. Read %d items instead of 7.\n", read_items);
+        return;
+    }
+
+    ssize_t bytes_written = write(pipefd[1], &info, sizeof(info));
+
+    if (bytes_written == -1) {
+        perror("Error writing to pipe");
+        return;
+    }  
 
 }
 
@@ -280,7 +367,8 @@ void CPUGraphics(char terminal[1024][1024], double usage, int i){
     }
 }
 
-void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_previous, long int* idle_previous){
+void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_previous, long int* idle_previous, cpu_stats info){
+
     /**
     * Prints information about the current CPU usage of the system
     *
@@ -294,32 +382,9 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
     *
     */
 
-    // Gets system info
-    struct sysinfo cpu;
-    if (sysinfo(&cpu) != 0) {
-        fprintf(stderr, "Error: failed to get system info. (%s)\n", strerror(errno));
-        return;
-    }
     
-    // Opens proc stat file with cpu usage
-    FILE *fp = fopen("/proc/stat", "r");
-    if (fp == NULL) {
-        fprintf(stderr, "Error: failed to open /proc/stat. (%s)\n", strerror(errno));
-        return;
-    }
-
-    long int user, nice, system, idle, iowait, irq, softirq;
-    int read_items = fscanf(fp, "cpu %ld %ld %ld %ld %ld %ld %ld", &user, &nice, &system, &idle, &iowait, &irq, &softirq);
-    fclose(fp);
-
-    // Checks that all the items have been read
-    if (read_items != 7) {
-        fprintf(stderr, "Error: failed to read CPU values from /proc/stat. Read %d items instead of 7.\n", read_items);
-        return;
-    }
-
     // Calculates total usage of cpu
-    long int cpu_total = user + nice + system + iowait + irq + softirq;
+    long int cpu_total = info.user + info.nice + info.system + info.iowait + info.irq + info.softirq;
 
     // If -1 is passed as iteration then we only define previous values to prevent seg fault
     if (i == -1){
@@ -355,83 +420,6 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
     // If graphics have been slected then call the graphics function to add the visuals
     if (graphics){ CPUGraphics(terminal, cpu_use, i); }
     
-}
-
-void createUserChildProcess(int pipefd[2]) {
-    pid_t pid = fork();
-
-    if (pid == -1) {
-        fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
-        exit(1);
-    }
-    else if (pid == 0) {
-        // Child process
-        close(pipefd[0]); // Close unused read end
-        dup2(pipefd[1], STDOUT_FILENO); // Redirect stdout to the pipe
-        close(pipefd[1]); // Close unused write end
-        userOutput();
-        exit(0);
-    } 
-    else {
-        // Parent process
-        close(pipefd[1]); // Close unused write end
-
-        // Read user information from the pipe
-        char buffer[1024];
-        int bytesRead;
-        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
-            buffer[bytesRead] = '\0';
-            printf("%s", buffer);
-        }
-        close(pipefd[0]); // Close read end after reading
-    }
-}
-
-void createMemoryChildProcess(int pipefd[2], char terminal[1024][1024], bool graphics, int i, double* memory_previous) {
-    pid_t pid = fork();
-
-    if (pid == -1) {
-        fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
-        exit(1);
-    }
-    else if (pid == 0) {
-        // Child process
-        close(pipefd[0]); // Close unused read end
-        dup2(pipefd[1], STDOUT_FILENO); // Redirect stdout to the pipe
-        close(pipefd[1]); // Close unused write end
-        systemOutput(terminal, graphics, i, memory_previous);
-        exit(0);
-    } 
-    else {
-        // Parent process
-        close(pipefd[1]); // Close unused write end
-
-        // Read user information from the pipe
-        char buffer[1024];
-        int bytesRead;
-        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
-            buffer[bytesRead] = '\0';
-            printf("%s", buffer);
-        }
-        close(pipefd[0]); // Close read end after reading
-    }
-}
-
-void createCPUChildProcess(int pipefd[2], char terminal[1024][1024], bool graphics, int i, long int* cpu_previous, long int* idle_previous) {
-    pid_t pid = fork();
-
-    if (pid == -1) {
-        fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
-        exit(1);
-    } 
-    else if (pid == 0) {
-        // Child process
-        close(pipefd[0]); // Close unused read end
-        dup2(pipefd[1], STDOUT_FILENO); // Redirect stdout to the pipe
-        close(pipefd[1]); // Close unused write end
-        CPUOutput(terminal, graphics, i, cpu_previous, idle_previous);
-        exit(0);
-    }
 }
 
 void display(int samples, int tdelay, bool system, bool user, bool graphics, bool sequential){
@@ -476,41 +464,117 @@ void display(int samples, int tdelay, bool system, bool user, bool graphics, boo
     // Create Pipes
     int pipefd_memory[2], pipefd_cpu[2], pipefd_user[2];
 
-    if (pipe(pipefd_memory) == -1 || pipe(pipefd_cpu) == -1 || pipe(pipefd_user) == -1) {
-        fprintf(stderr, "Error: pipe creation failed. (%s)\n", strerror(errno));
-        exit(1);
-    }
-
     // Initialize the cpu information with -1 iteration
     CPUOutput(CPU_output, graphics, -1, &cpu_previous, &idle_previous);
     
+
+
     // Loop samples number of times
     for (int i = 0; i < samples; i++){
-        // If sequential is selected then we do not reset terminal between iterations and state iteration number
-        if (!sequential){ printf("\033[2J \033[1;1H\n"); }
-        else { printf(">>> iteration %d\n", i); }
 
-        // Displays header information
-        headerUsage(samples, tdelay);
-
-        // If system is slected diplays systems information usinf systemOutput function
-        if (system){
-            systemOutput(terminal_memory_output, graphics, i, &memory_previous);
-            for (int j = 0; j < samples - i - 1; j++){ printf("\n"); }
+        // Create the pipes
+        if (pipe(pipefd_memory) == -1 || pipe(pipefd_cpu) == -1 || pipe(pipefd_user) == -1) {
+            fprintf(stderr, "Error: pipe creation failed. (%s)\n", strerror(errno));
+            exit(1);
         }
-        
-         // If user is slected diplays user information usinf userOutput function
-        if (user){ createUserChildProcess(pipefd_user); }
-        // Displays cpu information using CPUOutput function is system is selected
-        if (system){ CPUOutput(CPU_output, graphics, i, &cpu_previous, &idle_previous); }
 
-        // Delay the output for tdelay seconds
-        sleep(tdelay);
+        pid_t pid_memory = fork();
+
+        if (pid_memory == -1) {
+            fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
+            exit(1);
+        }
+        else if (pid_memory == 0) {
+            // Child process
+            close(pipefd_memory[0]); // Close unused read 
+            close(pipefd_cpu[0]); close(pipefd_cpu[1]); close(pipefd_user[0]); close(pipefd_user[1]); 
+            dup2(pipefd_memory[1], STDOUT_FILENO); // Redirect stdout to the pipe
+            close(pipefd_memory[1]); // Close unused write end
+            // Memory
+            exit(0);
+        } 
+        else {
+
+            pid_t pid_users = fork();
+
+            if (pid_users == -1) {
+                fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
+                exit(1);
+            }
+            else if (pid_users == 0) {
+                // Child process
+                close(pipefd_user[0]); // Close unused read 
+                close(pipefd_memory[0]); close(pipefd_memory[1]); close(pipefd_cpu[0]); close(pipefd_cpu[1]); 
+                dup2(pipefd_user[1], STDOUT_FILENO); // Redirect stdout to the pipe
+                close(pipefd_user[1]); // Close unused write end
+                userOutput(pipefd_user);
+                exit(0);
+            } 
+            else {
+
+                pid_t pid_cpu = fork();
+
+                if (pid_cpu == -1) {
+                    fprintf(stderr, "Error: fork failed. (%s)\n", strerror(errno));
+                    exit(1);
+                }
+                else if (pid_cpu == 0) {
+                    // Child process
+                    close(pipefd_cpu[0]); // Close unused read 
+                    close(pipefd_memory[0]); close(pipefd_memory[1]); close(pipefd_user[0]); close(pipefd_user[1]); 
+                    dup2(pipefd_cpu[1], STDOUT_FILENO); // Redirect stdout to the pipe
+                    close(pipefd_cpu[1]); // Close unused write end
+                    // Cpu
+                    exit(0);
+                }
+                else{
+                    
+                    // Main partent Process
+                    // Close the write end of the pipe for the parent
+                    close(pipefd_cpu[1]); close(pipefd_memory[1]); close(pipefd_user[1]);
+                    // Wait for all child processes to finish
+                    waitpid(pid_memory, NULL, 0);
+                    waitpid(pid_users, NULL, 0);
+                    waitpid(pid_cpu, NULL, 0);
+
+
+                
+                    // If sequential is selected then we do not reset terminal between iterations and state iteration number
+                    if (!sequential){ printf("\033[2J \033[1;1H\n"); }
+                    else { printf(">>> iteration %d\n", i); }
+
+                    // Displays header information
+                    headerUsage(samples, tdelay);
+
+                    // If system is slected diplays systems information usinf systemOutput function
+                    if (system){
+                        createMemoryChildProcess(pipefd_memory, graphics, i, &memory_previous);
+                        close(pipefd_memory[1]);
+                        read(pipefd_memory[0], terminal_memory_output[i], sizeof(terminal_memory_output[i]));
+                        printf("%s\n", terminal_memory_output[i]);
+                        for (int j = 0; j < samples - i - 1; j++){ printf("\n"); }
+                    }
+                    
+                    // If user is slected diplays user information usinf userOutput function
+                    if (user){ createUserChildProcess(pipefd_user); }
+                    // Displays cpu information using CPUOutput function is system is selected
+                    if (system){ CPUOutput(CPU_output, graphics, i, &cpu_previous, &idle_previous); }
+
+                    // Delay the output for tdelay seconds
+                    sleep(tdelay);
+
+                    // Close the pipes for reading 
+                    close(pipefd_memory[0]);
+                    close(pipefd_cpu[0]);
+                    close(pipefd_user[0]);
+
+                    // Displays footer
+                    footerUsage();
+
+                }
+            }
+        }
     }
-
-    // Displays footer
-    footerUsage();
-
 }
 
 int main(int argc, char *argv[]){
