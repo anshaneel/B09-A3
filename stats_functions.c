@@ -21,6 +21,8 @@ void headerUsage(int samples, int tdelay){
     // Check for errors in getrusage
     if (result != 0) {
         fprintf(stderr, "Error: getrusage failed with error code: %d - %s\n", errno, strerror(errno));
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
         return;
     }
 
@@ -56,6 +58,8 @@ void footerUsage(){
     // Check for errors in uname
     if (result == -1) {
         fprintf(stderr, "Error: uname failed with error code: %d - %s\n", errno, strerror(errno));
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
         return;
     }
 
@@ -134,6 +138,8 @@ void memoryStats(int pipefd[2]){
     // Check for errors in sysinfo
     if (result != 0) {
         fprintf(stderr, "Error: sysinfo failed with error code: %d - %s\n", errno, strerror(errno));
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
         return;
     }
 
@@ -147,6 +153,8 @@ void memoryStats(int pipefd[2]){
 
     if (bytes_written == -1) {
         perror("Error writing to pipe");
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
         return;
     }       
 
@@ -170,7 +178,15 @@ void systemOutput(char terminal[1024][1024], bool graphics, int i, double* memor
 
     // Gets memory
     struct sysinfo memory;
-    sysinfo (&memory);
+    if (sysinfo(&memory) == -1) {
+        fprintf(stderr, "Error: failed to get system information. (%s)\n", strerror(errno));
+        
+        // Terminate the process and its parent if desired
+        fprintf(stderr, "Error occurred, terminating the process and its parent.\n");
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
+        return;
+    }
     
     
     // Add the memmory usage to terminal
@@ -199,7 +215,8 @@ void userOutput(int pipefd[2]){
     struct utmp *utmp;
     if (utmpname(_PATH_UTMP) == -1) {
         perror("Error setting utmp file");
-        return;
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
     }
 
     setutent();
@@ -217,7 +234,8 @@ void userOutput(int pipefd[2]){
             ssize_t bytes_written = write(pipefd[1], buffer, strlen(buffer));
             if (bytes_written == -1) {
                 perror("Error writing to pipe");
-                return;
+                kill(getpid(), SIGTERM); // Terminate the current process
+                kill(getppid(), SIGTERM); // Terminate the parent process
             }       
         }
     }
@@ -236,14 +254,16 @@ void cpuStats(int pipefd[2]){
     struct sysinfo cpu;
     if (sysinfo(&cpu) != 0) {
         fprintf(stderr, "Error: failed to get system info. (%s)\n", strerror(errno));
-        return;
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
     }
     
     // Opens proc stat file with cpu usage
     FILE *fp = fopen("/proc/stat", "r");
     if (fp == NULL) {
         fprintf(stderr, "Error: failed to open /proc/stat. (%s)\n", strerror(errno));
-        return;
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
     }
 
     int read_items = fscanf(fp, "cpu %ld %ld %ld %ld %ld %ld %ld", &info.user, &info.nice, &info.system, &info.idle, &info.iowait, &info.irq, &info.softirq);
@@ -252,14 +272,16 @@ void cpuStats(int pipefd[2]){
     // Checks that all the items have been read
     if (read_items != 7) {
         fprintf(stderr, "Error: failed to read CPU values from /proc/stat. Read %d items instead of 7.\n", read_items);
-        return;
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
     }
 
     ssize_t bytes_written = write(pipefd[1], &info, sizeof(info));
 
     if (bytes_written == -1) {
         perror("Error writing to pipe");
-        return;
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
     }  
 
 }
@@ -332,7 +354,8 @@ void CPUOutput(char terminal[1024][1024], bool graphics, int i, long int* cpu_pr
     long int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cores < 0) {
         fprintf(stderr, "Error: failed to get the number of cores. (%s)\n", strerror(errno));
-        return;
+        kill(getpid(), SIGTERM); // Terminate the current process
+        kill(getppid(), SIGTERM); // Terminate the parent process
     }
 
     printf("--------------------------------------------\n");
