@@ -56,8 +56,8 @@ If value is not indicated the default value will be 10.
 If value is not indicated the default value will be 1 sec.
 
 ## How to run the program
-1) Compile it: gcc mySystemStats.c
-2) Run the executable file with any of the command line arguments: ex) ./a.out --samples=10 --tdelay=2 --graphics
+1) Compile it: (gcc mySystemStats.c stats_functions.c -o mySystemStats) or using the makefile (make -f mySystemStats.mak)
+2) Run the executable file with any of the command line arguments: ex) ./mySystemStats --graphics
 
 
 ## Functions
